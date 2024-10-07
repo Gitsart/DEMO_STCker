@@ -1,0 +1,218 @@
+#include<MobaTools.h>
+const byte stepPin = 18;
+const byte dirPin = 19;
+
+#define limitPin A10
+const byte senPin = A11;
+#define startPin 6
+
+const int stepsperRev = 200;
+
+volatile unsigned int pulseCount = 0;  // Number of pulses counted
+unsigned long prevMillis = 0;          // To track time for calculating RPM
+const int timeWindow = 1000;           // Time window in milliseconds for RPM calculation
+float rpm = 0;                         // Calculated RPM
+
+const int PPR = 600;                   // Pulses per revolution (actual PPR of your encoder)
+const int countingMethod = 1;          // Set to 1 for 1x counting, 2 for 2x, 4 for 4x quadrature counting
+unsigned long debounceDelay = 2000;    // Debouncing for pulse (adjust if necessary)
+unsigned long lastPulseTime = 0;       // Time of last valid pulse (for debouncing)
+
+
+
+long  nextPos;
+const long targetPos = 1800;
+
+int count = 0;
+int limit_count = 0;
+
+bool limswitch = 0;
+
+int hOme = 0;
+int pos = 0;
+int sTart = 0;
+int cloth = 0;
+int axSpeed;
+
+int cloth_count = 0;
+
+MoToStepper stepper1(stepsperRev, STEPDIR);
+MoToTimer stepperPause;
+
+bool stepperRunning;
+bool movingForward;
+bool clothDetected;
+
+
+void setup() {
+  Serial.begin(9600);
+  stepper1.attach(stepPin, dirPin);
+  stepper1.setRampLen(10);
+
+
+  stepperRunning = false;
+  movingForward = true;
+  clothDetected = false;
+
+
+  pinMode(limitPin, INPUT_PULLUP);
+  pinMode(startPin, INPUT_PULLUP);
+  pinMode(senPin, INPUT_PULLUP);
+  homing();
+  set_pos();
+  pinMode(2, INPUT_PULLUP);  // Encoder A
+  pinMode(3, INPUT_PULLUP);  // Encoder B
+
+  // Attach an interrupt to the encoder A channel
+  attachInterrupt(digitalPinToInterrupt(2), encoderISR_A, RISING);
+}
+
+void loop() {
+
+  encode();
+
+
+  while (digitalRead(startPin) == LOW)
+  {
+    sTart = 1;
+  }
+
+
+  if ((hOme == 2) && (limit_count > 1) && (count == 0) && (pos = 1) && (sTart == 1))
+  {
+    int sen = digitalRead(senPin);
+    bool sensorFound = false;
+
+    if (sen == 0 || sen == 1)
+    {
+      sensorFound = true;
+    }
+
+    if (sen == 0) {
+      clothDetected = false;
+      motor();
+      Serial.print("CLOTHCOUNT:"); Serial.println(cloth_count);
+
+    }
+  }
+}
+
+void homing() {
+  stepper1.setSpeed(1500);
+  while (digitalRead(limitPin) != HIGH && limit_count == 0) {
+    stepper1.rotate(1);
+    Serial.print(limswitch);
+    Serial.println("Finding END");
+  }
+
+  if (digitalRead(limitPin) == HIGH && limit_count == 0) {
+    stepper1.stop();
+    Serial.println("END POSITION");
+    limit_count += 1;
+    limswitch = HIGH;
+    hOme = 1;
+  }
+  stepper1.setZero();
+  delay(2000);
+  stepper1.setSpeed(200); stepper1.moveTo(-400);
+  limswitch = LOW;
+  delay(2000);
+  while (digitalRead(limitPin) != HIGH && limit_count == 1) {
+    stepper1.rotate(1);
+    Serial.print(limswitch);
+    Serial.println("Finding END2");
+  }
+  if (digitalRead(limitPin) == HIGH && limit_count == 1) {
+    stepper1.stop();
+    Serial.println("END POSITION2");
+    limit_count += 1;
+    limswitch = HIGH;
+    hOme = 2;
+  }
+  Serial.print("limit_count:"); Serial.println(limit_count);
+  Serial.print("limswitch:"); Serial.println(limswitch);
+  Serial.print("hOme:"); Serial.println(hOme);
+  Serial.print("POS:"); Serial.println(pos);
+  stepper1.setZero();
+  delay(2000);
+}
+
+void set_pos() {
+
+  while (hOme == 2 && limit_count > 1 && limswitch == HIGH && pos == 0) {
+
+    delay(1000);
+    stepper1.setSpeed(1800);
+    stepper1.moveTo(-1800);
+
+    while (stepper1.moving()) {
+      Serial.println("MOVING to Pos1");
+    }
+
+    pos = 1;
+    Serial.println("StartPositionSet, READY TO USE");
+  }
+  Serial.print("POS:"); Serial.println(pos);
+}
+
+void motor() {
+
+  if (!stepperRunning && !clothDetected)
+  {
+    // Set the flag to true when signature is not detected
+    clothDetected = true;
+
+    // Move forward
+    stepper1.setSpeed(axSpeed);
+    stepper1.move(targetPos);
+    Serial.println("Moving forward");
+    cloth_count++;
+    stepperRunning = true;
+
+    while (stepper1.moving())
+    {
+      delay(10); // Wait until the forward movement is complete
+    }
+
+    // Move backward
+    stepper1.setSpeed(2000);
+    stepper1.move(-targetPos);
+    Serial.println("Moving backward");
+
+    while (stepper1.moving())
+    {
+      delay(10); // Wait until the backward movement is complete
+    }
+
+    stepperRunning = false; // Reset the flag when the complete oscillation is done
+  }
+}
+
+void encode() {
+  unsigned long currentMillis = millis();
+
+  // Every `timeWindow` milliseconds, calculate the RPM
+  if (currentMillis - prevMillis >= timeWindow) {
+    prevMillis = currentMillis;
+
+    // Calculate RPM based on pulse count during the last time window
+    rpm = (pulseCount * 60.0) / (PPR * countingMethod);  // Adjusted RPM formula for different counting methods
+
+    axSpeed = (rpm*100);
+    // Print RPM to the serial monitor
+    Serial.print("RPM: ");
+    Serial.println(rpm);
+
+    // Reset pulseCount for the next time window
+    pulseCount = 0;
+  }
+}
+
+// Interrupt Service Routine (ISR) for encoder A channel
+void encoderISR_A() {
+  unsigned long currentTime = micros();  // Get current time in microseconds
+  if (currentTime - lastPulseTime > debounceDelay) {  // Check for debounce
+    pulseCount++;  // Increment pulse count
+    lastPulseTime = currentTime;  // Update last pulse time
+  }
+}
